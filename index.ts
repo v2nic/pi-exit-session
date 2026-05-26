@@ -39,12 +39,38 @@ export function formatCrashBanner(info: SessionInfo): string {
   ].join("\n");
 }
 
-// Module-scoped state: shared across all extension instances in the same process.
-// This prevents listener accumulation when the extension factory runs multiple times
-// (e.g., in tests or hot-reload scenarios) and ensures process error handlers are
-// registered only once.
-let globalSessionInfo: SessionInfo | undefined;
-let processHandlersRegistered = false;
+/**
+ * Format the normal "Session ended" exit banner (TUI mode only).
+ * Exported for testing.
+ */
+export function formatExitBanner(info: SessionInfo): string {
+  const resumeCmd = `pi --session ${info.id}`;
+  const forkCmd = `pi --fork ${info.id}`;
+
+  return [
+    "",
+    "\x1b[1m📋 Session ended\x1b[0m",
+    `\x1b[36m↩️  Resume:\x1b[0m ${resumeCmd}`,
+    `\x1b[35m🔀 Fork:\x1b[0m   ${forkCmd}`,
+    "",
+  ].join("\n");
+}
+
+// Use a well-known Symbol on process as a cross-module-instance guard.
+// A module-scoped boolean would fail when two instances of this module
+// are loaded in the same process (e.g. old + new version both installed),
+// because each instance has its own copy of the variable.
+// Symbol.for() resolves to the same symbol across all module instances.
+const REGISTERED = Symbol.for("pi-exit-session:registered");
+const SESSION_INFO = Symbol.for("pi-exit-session:sessionInfo");
+
+function getSessionInfo(): SessionInfo | undefined {
+  return (process as any)[SESSION_INFO];
+}
+
+function setSessionInfo(info: SessionInfo | undefined): void {
+  (process as any)[SESSION_INFO] = info;
+}
 
 /**
  * Write a crash banner to stderr if session info is available.
@@ -52,8 +78,9 @@ let processHandlersRegistered = false;
  * Exported for testing.
  */
 export function onProcessError(): boolean {
-  if (!globalSessionInfo) return false;
-  process.stderr.write(formatCrashBanner(globalSessionInfo));
+  const info = getSessionInfo();
+  if (!info) return false;
+  process.stderr.write(formatCrashBanner(info));
   return true;
 }
 
@@ -61,11 +88,13 @@ export function onProcessError(): boolean {
  * Register process-level error handlers exactly once per process.
  * Uses uncaughtExceptionMonitor so we observe crashes without
  * altering Node's default crash behavior (stack trace + exit).
+ * Also registers a process.on("exit") handler for TUI mode that prints
+ * the "Session ended" banner after the TUI restores the main screen.
  * Exported for testing.
  */
 export function registerProcessHandlers(): void {
-  if (processHandlersRegistered) return;
-  processHandlersRegistered = true;
+  if ((process as any)[REGISTERED]) return;
+  (process as any)[REGISTERED] = true;
 
   process.on("uncaughtExceptionMonitor", () => {
     onProcessError();
@@ -74,16 +103,28 @@ export function registerProcessHandlers(): void {
   process.on("unhandledRejection", () => {
     onProcessError();
   });
+
+  // Print the "Session ended" banner on normal exit (TUI mode only).
+  // Skipped when:
+  // - exit code is non-zero (crash banner was already printed)
+  // - session is non-TUI (non-TUI already writes to stderr in session_shutdown)
+  // - no session info (ephemeral session)
+  process.on("exit", (code: number) => {
+    if (code !== 0) return;
+    const info = getSessionInfo();
+    if (!info || !info.hasUI) return;
+    process.stderr.write(formatExitBanner(info));
+  });
 }
 
 /**
- * Reset module-scoped state for testing.
- * If sessionInfo is provided, sets it as the current session info.
- * Also resets the process handler registration guard.
+ * Reset session info for testing.
+ * Does NOT reset the REGISTERED guard or remove process listeners —
+ * doing so would cause listener accumulation across test runs.
+ * Only resets the session info so tests start with a clean slate.
  */
 export function _testReset(sessionInfo?: SessionInfo): void {
-  globalSessionInfo = sessionInfo;
-  processHandlersRegistered = false;
+  setSessionInfo(sessionInfo);
 }
 
 export default function (pi: ExtensionAPI) {
@@ -96,7 +137,7 @@ export default function (pi: ExtensionAPI) {
     const id = sessionId || sessionFile;
 
     if (id) {
-      globalSessionInfo = { id, sessionFile, hasUI: ctx.hasUI };
+      setSessionInfo({ id, sessionFile, hasUI: ctx.hasUI });
     }
   });
 
@@ -110,33 +151,24 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    // Update session info in case session_start didn't capture it
-    globalSessionInfo = { id, sessionFile, hasUI: ctx.hasUI };
+    // Update session info so the process.on("exit") handler has the latest state.
+    setSessionInfo({ id, sessionFile, hasUI: ctx.hasUI });
 
     const resumeCmd = `pi --session ${id}`;
     const forkCmd = `pi --fork ${id}`;
 
     if (ctx.hasUI) {
-      // In TUI mode, the alternate screen buffer gets wiped on exit.
-      // Show a brief in-TUI notification AND schedule output after TUI teardown.
+      // In TUI mode, show a brief in-TUI notification.
+      // The actual post-TUI banner is printed by the process.on("exit") handler
+      // registered in registerProcessHandlers() — it fires after the TUI
+      // restores the terminal to its original state.
       ctx.ui.notify(
         `📋 Session: ${id}\n↩️  Resume: ${resumeCmd}\n🔀 Fork:   ${forkCmd}`,
         "info"
       );
-
-      // Schedule the real output for after the TUI restores the main screen.
-      // process.on('exit') runs synchronously during process shutdown,
-      // after the TUI has restored the terminal to its original state.
-      const banner = [
-        "",
-        "\x1b[1m📋 Session ended\x1b[0m",
-        `\x1b[36m↩️  Resume:\x1b[0m ${resumeCmd}`,
-        `\x1b[35m🔀 Fork:\x1b[0m   ${forkCmd}`,
-        "",
-      ].join("\n");
-      process.on("exit", () => process.stderr.write(banner));
     } else {
-      // Non-TUI mode: write directly to stderr
+      // Non-TUI mode: write directly to stderr now.
+      // No exit handler output — the exit handler only runs for TUI mode.
       process.stderr.write(`\nSession: ${id}\nResume: ${resumeCmd}\nFork:   ${forkCmd}\n`);
     }
   });
