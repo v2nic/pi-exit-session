@@ -12,7 +12,8 @@
     "url": "https://github.com/v2nic/pi-exit-session/issues"
   },
   "files": [
-    "src"
+    "index.ts",
+    "test"
   ],
   "keywords": [
     "pi-package",
@@ -25,7 +26,7 @@
   "license": "MIT",
   "pi": {
     "extensions": [
-      "./src/index.ts"
+      "./index.ts"
     ]
   },
   "peerDependencies": {
