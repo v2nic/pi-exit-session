@@ -49,7 +49,7 @@ describe("pi-exit-session extension", () => {
 
     // Dynamically import the extension to register its handlers
     // We pass our mock pi object as the ExtensionAPI
-    const mod = await import("../src/index.ts");
+    const mod = await import("../index.ts");
     const extensionFactory = mod.default;
     extensionFactory(pi as any);
   });

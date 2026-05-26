@@ -1,21 +1,21 @@
 {
   "name": "pi-exit-session",
   "version": "1.0.0",
-  "description": "Pi coding agent extension that prints the session ID and resume command on shutdown",
-  "main": "dist/index.mjs",
-  "types": "dist/index.d.mts",
-  "exports": {
-    ".": {
-      "import": "./dist/index.mjs",
-      "types": "./dist/index.d.mts"
-    }
+  "description": "Pi coding agent extension that prints the session ID and resume/fork commands on shutdown",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/v2nic/pi-exit-session.git"
   },
-  "scripts": {
-    "build": "tsup src/index.ts --format esm --dts",
-    "test": "vitest run",
-    "test:watch": "vitest"
+  "homepage": "https://github.com/v2nic/pi-exit-session",
+  "bugs": {
+    "url": "https://github.com/v2nic/pi-exit-session/issues"
   },
+  "files": [
+    "src"
+  ],
   "keywords": [
+    "pi-package",
     "pi",
     "coding-agent",
     "extension",
@@ -23,15 +23,21 @@
     "exit"
   ],
   "license": "MIT",
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.75.0"
+  },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "^0.75.2",
-    "tsup": "^8.5.0",
     "typescript": "^5.8.0",
     "vitest": "^3.2.0"
   },
-  "pi": {
-    "extensions": [
-      "dist/index.mjs"
-    ]
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
   }
 }
