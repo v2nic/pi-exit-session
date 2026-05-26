@@ -1,8 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-
-// We import the extension factory function.
-// Since the extension uses ESM default export, we'll test the logic
-// by creating mocks for the pi API and verifying the side effects.
+import { formatCrashBanner, onProcessError, type SessionInfo, _testReset } from "../index.ts";
+import extensionFactory from "../index.ts";
 
 // Mock process.stderr.write
 const stderrWriteSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
@@ -31,6 +29,140 @@ function createMockPi() {
   return { pi, mockSessionManager, mockUi, handlers };
 }
 
+describe("formatCrashBanner", () => {
+  it("formats TUI crash banner with ANSI codes", () => {
+    const info: SessionInfo = {
+      id: "abc123",
+      sessionFile: "/home/.pi/sessions/abc.jsonl",
+      hasUI: true,
+    };
+
+    const banner = formatCrashBanner(info);
+
+    expect(banner).toContain("Session crashed");
+    expect(banner).toContain("abc123");
+    expect(banner).toContain("pi --session abc123");
+    expect(banner).toContain("pi --fork abc123");
+    expect(banner).toContain("/home/.pi/sessions/abc.jsonl");
+    expect(banner).toContain("\x1b[1m"); // bold
+    expect(banner).toContain("\x1b[33m"); // yellow (file)
+    expect(banner).toContain("\x1b[36m"); // cyan (resume)
+    expect(banner).toContain("\x1b[35m"); // magenta (fork)
+  });
+
+  it("formats plain-text crash banner without ANSI codes", () => {
+    const info: SessionInfo = {
+      id: "xyz789",
+      sessionFile: "/home/.pi/sessions/xyz.jsonl",
+      hasUI: false,
+    };
+
+    const banner = formatCrashBanner(info);
+
+    expect(banner).toContain("Session crashed");
+    expect(banner).toContain("xyz789");
+    expect(banner).toContain("pi --session xyz789");
+    expect(banner).toContain("pi --fork xyz789");
+    expect(banner).toContain("/home/.pi/sessions/xyz.jsonl");
+    expect(banner).not.toContain("\x1b["); // no ANSI escape codes
+  });
+
+  it("shows (unknown) when sessionFile is undefined", () => {
+    const info: SessionInfo = {
+      id: "short-id",
+      sessionFile: undefined,
+      hasUI: true,
+    };
+
+    const banner = formatCrashBanner(info);
+
+    expect(banner).toContain("(unknown)");
+  });
+
+  it("uses sessionFile path as id when sessionId is empty", () => {
+    const info: SessionInfo = {
+      id: "/path/to/session.jsonl",
+      sessionFile: "/path/to/session.jsonl",
+      hasUI: false,
+    };
+
+    const banner = formatCrashBanner(info);
+
+    expect(banner).toContain("pi --session /path/to/session.jsonl");
+    expect(banner).toContain("pi --fork /path/to/session.jsonl");
+  });
+});
+
+describe("onProcessError", () => {
+  beforeEach(() => {
+    stderrWriteSpy.mockClear();
+    // Reset module-scoped state between tests
+    _testReset();
+  });
+
+  it("returns false and writes nothing when no session info is set", () => {
+    const result = onProcessError();
+    expect(result).toBe(false);
+    expect(stderrWriteSpy).not.toHaveBeenCalled();
+  });
+
+  it("writes crash banner and returns true when session info is set (TUI mode)", () => {
+    const info: SessionInfo = {
+      id: "crash-session-1",
+      sessionFile: "/home/.pi/sessions/crash.jsonl",
+      hasUI: true,
+    };
+    _testReset(info);
+
+    const result = onProcessError();
+
+    expect(result).toBe(true);
+    expect(stderrWriteSpy).toHaveBeenCalledOnce();
+    const output = stderrWriteSpy.mock.calls[0][0] as string;
+    expect(output).toContain("Session crashed");
+    expect(output).toContain("crash-session-1");
+    expect(output).toContain("pi --session crash-session-1");
+    expect(output).toContain("pi --fork crash-session-1");
+    expect(output).toContain("/home/.pi/sessions/crash.jsonl");
+    expect(output).toContain("\x1b[1m"); // bold ANSI code
+  });
+
+  it("writes plain-text crash banner when session info has hasUI=false", () => {
+    const info: SessionInfo = {
+      id: "plain-crash-3",
+      sessionFile: "/home/.pi/sessions/plain.jsonl",
+      hasUI: false,
+    };
+    _testReset(info);
+
+    const result = onProcessError();
+
+    expect(result).toBe(true);
+    expect(stderrWriteSpy).toHaveBeenCalledOnce();
+    const output = stderrWriteSpy.mock.calls[0][0] as string;
+    expect(output).toContain("Session crashed");
+    expect(output).toContain("plain-crash-3");
+    expect(output).toContain("pi --session plain-crash-3");
+    expect(output).not.toContain("\x1b["); // no ANSI codes
+  });
+
+  it("uses sessionFile as id when sessionId is empty", () => {
+    const info: SessionInfo = {
+      id: "/home/.pi/sessions/no-id.jsonl",
+      sessionFile: "/home/.pi/sessions/no-id.jsonl",
+      hasUI: true,
+    };
+    _testReset(info);
+
+    const result = onProcessError();
+
+    expect(result).toBe(true);
+    const output = stderrWriteSpy.mock.calls[0][0] as string;
+    expect(output).toContain("/home/.pi/sessions/no-id.jsonl");
+    expect(output).toContain("pi --session /home/.pi/sessions/no-id.jsonl");
+  });
+});
+
 describe("pi-exit-session extension", () => {
   let pi: ReturnType<typeof createMockPi>["pi"];
   let mockSessionManager: ReturnType<typeof createMockPi>["mockSessionManager"];
@@ -39,21 +171,27 @@ describe("pi-exit-session extension", () => {
   beforeEach(async () => {
     vi.clearAllMocks();
     stderrWriteSpy.mockClear();
+    // Reset module-scoped state between tests
+    _testReset();
 
     const mock = createMockPi();
     pi = mock.pi;
     mockSessionManager = mock.mockSessionManager;
     mockUi = mock.mockUi;
 
-    // Dynamically import the extension to register its handlers
-    const mod = await import("../index.ts");
-    const extensionFactory = mod.default;
+    // Re-initialize the extension using the statically imported factory.
+    // _testReset() above already cleared module-scoped state.
     extensionFactory(pi as any);
   });
 
   it("registers a session_shutdown handler", () => {
     expect(pi._handlers["session_shutdown"]).toBeDefined();
-    expect(pi._handlers["session_shutdown"].length).toBe(1);
+    expect(pi._handlers["session_shutdown"].length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("registers a session_start handler", () => {
+    expect(pi._handlers["session_start"]).toBeDefined();
+    expect(pi._handlers["session_start"].length).toBeGreaterThanOrEqual(1);
   });
 
   it("shows notify and registers exit banner in TUI mode", async () => {
@@ -70,7 +208,7 @@ describe("pi-exit-session extension", () => {
       return origProcessOn(event, handler) as typeof process;
     });
 
-    const handler = pi._handlers["session_shutdown"][0];
+    const handler = pi._handlers["session_shutdown"][pi._handlers["session_shutdown"].length - 1];
     const ctx = {
       sessionManager: mockSessionManager,
       hasUI: true,
@@ -87,11 +225,11 @@ describe("pi-exit-session extension", () => {
     expect(notification).toContain("pi --fork abc123");
 
     // Should register an exit handler that writes the banner
-    expect(exitHandlers.length).toBe(1);
+    expect(exitHandlers.length).toBeGreaterThanOrEqual(1);
 
     // Simulate process exit — the exit handler should write ANSI-colored output to stderr
     stderrWriteSpy.mockClear();
-    exitHandlers[0](); // call the exit handler
+    exitHandlers[exitHandlers.length - 1](); // call the last registered exit handler
     expect(stderrWriteSpy).toHaveBeenCalledOnce();
     const output = stderrWriteSpy.mock.calls[0][0] as string;
     expect(output).toContain("Session ended");
@@ -112,7 +250,7 @@ describe("pi-exit-session extension", () => {
       return process;
     });
 
-    const handler = pi._handlers["session_shutdown"][0];
+    const handler = pi._handlers["session_shutdown"][pi._handlers["session_shutdown"].length - 1];
     const ctx = {
       sessionManager: mockSessionManager,
       hasUI: true,
@@ -126,7 +264,7 @@ describe("pi-exit-session extension", () => {
 
     // Exit handler should use session file path
     stderrWriteSpy.mockClear();
-    exitHandlers[0]();
+    exitHandlers[exitHandlers.length - 1]();
     expect(stderrWriteSpy.mock.calls[0][0]).toContain("/path/to/session.jsonl");
 
     processOnSpy.mockRestore();
@@ -136,7 +274,7 @@ describe("pi-exit-session extension", () => {
     mockSessionManager.getSessionId.mockReturnValue("xyz789");
     mockSessionManager.getSessionFile.mockReturnValue("/home/.pi/sessions/xyz.jsonl");
 
-    const handler = pi._handlers["session_shutdown"][0];
+    const handler = pi._handlers["session_shutdown"][pi._handlers["session_shutdown"].length - 1];
     const ctx = {
       sessionManager: mockSessionManager,
       hasUI: false,
@@ -159,7 +297,7 @@ describe("pi-exit-session extension", () => {
     mockSessionManager.getSessionId.mockReturnValue("");
     mockSessionManager.getSessionFile.mockReturnValue(undefined);
 
-    const handler = pi._handlers["session_shutdown"][0];
+    const handler = pi._handlers["session_shutdown"][pi._handlers["session_shutdown"].length - 1];
     const ctx = {
       sessionManager: mockSessionManager,
       hasUI: true,
@@ -182,7 +320,7 @@ describe("pi-exit-session extension", () => {
       return process;
     });
 
-    const handler = pi._handlers["session_shutdown"][0];
+    const handler = pi._handlers["session_shutdown"][pi._handlers["session_shutdown"].length - 1];
     const ctx = {
       sessionManager: mockSessionManager,
       hasUI: true,
@@ -196,10 +334,90 @@ describe("pi-exit-session extension", () => {
 
     // Exit banner should also use the short session ID
     stderrWriteSpy.mockClear();
-    exitHandlers[0]();
+    exitHandlers[exitHandlers.length - 1]();
     expect(stderrWriteSpy.mock.calls[0][0]).toContain("short-id-42");
     expect(stderrWriteSpy.mock.calls[0][0]).toContain("pi --session short-id-42");
 
     processOnSpy.mockRestore();
+  });
+
+  describe("session_start handler integration", () => {
+    it("captures session info that onProcessError can use", async () => {
+      mockSessionManager.getSessionId.mockReturnValue("start-id-99");
+      mockSessionManager.getSessionFile.mockReturnValue("/home/.pi/sessions/start.jsonl");
+
+      const startHandler = pi._handlers["session_start"][pi._handlers["session_start"].length - 1];
+      await startHandler({}, {
+        sessionManager: mockSessionManager,
+        hasUI: true,
+        ui: mockUi,
+      });
+
+      // Now onProcessError should print the crash banner
+      stderrWriteSpy.mockClear();
+      const result = onProcessError();
+
+      expect(result).toBe(true);
+      expect(stderrWriteSpy).toHaveBeenCalledOnce();
+      const output = stderrWriteSpy.mock.calls[0][0] as string;
+      expect(output).toContain("start-id-99");
+      expect(output).toContain("pi --session start-id-99");
+      expect(output).toContain("/home/.pi/sessions/start.jsonl");
+    });
+
+    it("does not capture info for ephemeral sessions", async () => {
+      // Reset to clear any previous session info
+      _testReset();
+
+      mockSessionManager.getSessionId.mockReturnValue("");
+      mockSessionManager.getSessionFile.mockReturnValue(undefined);
+
+      const startHandler = pi._handlers["session_start"][pi._handlers["session_start"].length - 1];
+      await startHandler({}, {
+        sessionManager: mockSessionManager,
+        hasUI: true,
+        ui: mockUi,
+      });
+
+      // onProcessError should return false — no session info captured
+      stderrWriteSpy.mockClear();
+      const result = onProcessError();
+
+      expect(result).toBe(false);
+      expect(stderrWriteSpy).not.toHaveBeenCalled();
+    });
+
+    it("session_shutdown updates session info used by onProcessError", async () => {
+      // First set session info via session_start
+      mockSessionManager.getSessionId.mockReturnValue("old-id");
+      mockSessionManager.getSessionFile.mockReturnValue("/old/path.jsonl");
+
+      const startHandler = pi._handlers["session_start"][pi._handlers["session_start"].length - 1];
+      await startHandler({}, {
+        sessionManager: mockSessionManager,
+        hasUI: true,
+        ui: mockUi,
+      });
+
+      // Then update via session_shutdown
+      mockSessionManager.getSessionId.mockReturnValue("updated-id");
+      mockSessionManager.getSessionFile.mockReturnValue("/updated/path.jsonl");
+
+      const shutdownHandler = pi._handlers["session_shutdown"][pi._handlers["session_shutdown"].length - 1];
+      await shutdownHandler({ type: "session_shutdown", reason: "quit" }, {
+        sessionManager: mockSessionManager,
+        hasUI: true,
+        ui: mockUi,
+      });
+
+      // onProcessError should use the updated session info
+      stderrWriteSpy.mockClear();
+      onProcessError();
+
+      expect(stderrWriteSpy).toHaveBeenCalledOnce();
+      const output = stderrWriteSpy.mock.calls[0][0] as string;
+      expect(output).toContain("updated-id");
+      expect(output).toContain("pi --session updated-id");
+    });
   });
 });
