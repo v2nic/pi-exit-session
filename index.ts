@@ -39,6 +39,23 @@ export function formatCrashBanner(info: SessionInfo): string {
   ].join("\n");
 }
 
+/**
+ * Format the normal "Session ended" exit banner (TUI mode only).
+ * Exported for testing.
+ */
+export function formatExitBanner(info: SessionInfo): string {
+  const resumeCmd = `pi --session ${info.id}`;
+  const forkCmd = `pi --fork ${info.id}`;
+
+  return [
+    "",
+    "\x1b[1m📋 Session ended\x1b[0m",
+    `\x1b[36m↩️  Resume:\x1b[0m ${resumeCmd}`,
+    `\x1b[35m🔀 Fork:\x1b[0m   ${forkCmd}`,
+    "",
+  ].join("\n");
+}
+
 // Use a well-known Symbol on process as a cross-module-instance guard.
 // A module-scoped boolean would fail when two instances of this module
 // are loaded in the same process (e.g. old + new version both installed),
@@ -71,17 +88,14 @@ export function onProcessError(): boolean {
  * Register process-level error handlers exactly once per process.
  * Uses uncaughtExceptionMonitor so we observe crashes without
  * altering Node's default crash behavior (stack trace + exit).
- * The process.on("exit") handler for normal shutdown is also registered
- * here so it is never duplicated regardless of how many times the
- * extension factory runs.
+ * Also registers a process.on("exit") handler for TUI mode that prints
+ * the "Session ended" banner after the TUI restores the main screen.
  * Exported for testing.
  */
 export function registerProcessHandlers(): void {
   if ((process as any)[REGISTERED]) return;
   (process as any)[REGISTERED] = true;
 
-  // uncaughtExceptionMonitor fires on uncaught exceptions without
-  // suppressing Node's default crash behavior.
   process.on("uncaughtExceptionMonitor", () => {
     onProcessError();
   });
@@ -90,38 +104,27 @@ export function registerProcessHandlers(): void {
     onProcessError();
   });
 
-  // Register the normal-exit banner once here instead of per session_shutdown,
-  // so multiple calls to the extension factory don't stack up exit handlers.
-  process.on("exit", () => {
+  // Print the "Session ended" banner on normal exit (TUI mode only).
+  // Skipped when:
+  // - exit code is non-zero (crash banner was already printed)
+  // - session is non-TUI (non-TUI already writes to stderr in session_shutdown)
+  // - no session info (ephemeral session)
+  process.on("exit", (code: number) => {
+    if (code !== 0) return;
     const info = getSessionInfo();
-    if (!info) return;
-
-    const resumeCmd = `pi --session ${info.id}`;
-    const forkCmd = `pi --fork ${info.id}`;
-
-    if (info.hasUI) {
-      const banner = [
-        "",
-        "\x1b[1m📋 Session ended\x1b[0m",
-        `\x1b[36m↩️  Resume:\x1b[0m ${resumeCmd}`,
-        `\x1b[35m🔀 Fork:\x1b[0m   ${forkCmd}`,
-        "",
-      ].join("\n");
-      process.stderr.write(banner);
-    } else {
-      process.stderr.write(`\nSession: ${info.id}\nResume: ${resumeCmd}\nFork:   ${forkCmd}\n`);
-    }
+    if (!info || !info.hasUI) return;
+    process.stderr.write(formatExitBanner(info));
   });
 }
 
 /**
- * Reset process-global state for testing.
- * If sessionInfo is provided, sets it as the current session info.
- * Also resets the process handler registration guard.
+ * Reset session info for testing.
+ * Does NOT reset the REGISTERED guard or remove process listeners —
+ * doing so would cause listener accumulation across test runs.
+ * Only resets the session info so tests start with a clean slate.
  */
 export function _testReset(sessionInfo?: SessionInfo): void {
   setSessionInfo(sessionInfo);
-  (process as any)[REGISTERED] = false;
 }
 
 export default function (pi: ExtensionAPI) {
@@ -148,24 +151,24 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    // Update session info in case session_start didn't capture it
+    // Update session info so the process.on("exit") handler has the latest state.
     setSessionInfo({ id, sessionFile, hasUI: ctx.hasUI });
+
+    const resumeCmd = `pi --session ${id}`;
+    const forkCmd = `pi --fork ${id}`;
 
     if (ctx.hasUI) {
       // In TUI mode, show a brief in-TUI notification.
-      // The actual banner is printed by the process.on("exit") handler
-      // registered in registerProcessHandlers().
-      const resumeCmd = `pi --session ${id}`;
-      const forkCmd = `pi --fork ${id}`;
+      // The actual post-TUI banner is printed by the process.on("exit") handler
+      // registered in registerProcessHandlers() — it fires after the TUI
+      // restores the terminal to its original state.
       ctx.ui.notify(
         `📋 Session: ${id}\n↩️  Resume: ${resumeCmd}\n🔀 Fork:   ${forkCmd}`,
         "info"
       );
     } else {
       // Non-TUI mode: write directly to stderr now.
-      // The exit handler also runs but only in TUI mode.
-      const resumeCmd = `pi --session ${id}`;
-      const forkCmd = `pi --fork ${id}`;
+      // No exit handler output — the exit handler only runs for TUI mode.
       process.stderr.write(`\nSession: ${id}\nResume: ${resumeCmd}\nFork:   ${forkCmd}\n`);
     }
   });
