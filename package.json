@@ -1,0 +1,37 @@
+{
+  "name": "pi-exit-session",
+  "version": "1.0.0",
+  "description": "Pi coding agent extension that prints the session ID and resume command on shutdown",
+  "main": "dist/index.mjs",
+  "types": "dist/index.d.mts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.mjs",
+      "types": "./dist/index.d.mts"
+    }
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "keywords": [
+    "pi",
+    "coding-agent",
+    "extension",
+    "session",
+    "exit"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.75.2",
+    "tsup": "^8.5.0",
+    "typescript": "^5.8.0",
+    "vitest": "^3.2.0"
+  },
+  "pi": {
+    "extensions": [
+      "dist/index.mjs"
+    ]
+  }
+}
