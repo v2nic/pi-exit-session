@@ -39,15 +39,56 @@ export function formatCrashBanner(info: SessionInfo): string {
   ].join("\n");
 }
 
-export default function (pi: ExtensionAPI) {
-  // Capture session info for use in process-level error handlers.
-  let sessionInfo: SessionInfo | undefined;
+// Module-scoped state: shared across all extension instances in the same process.
+// This prevents listener accumulation when the extension factory runs multiple times
+// (e.g., in tests or hot-reload scenarios) and ensures process error handlers are
+// registered only once.
+let globalSessionInfo: SessionInfo | undefined;
+let processHandlersRegistered = false;
 
-  function onProcessError(): boolean {
-    if (!sessionInfo) return false;
-    process.stderr.write(formatCrashBanner(sessionInfo));
-    return true;
-  }
+/**
+ * Write a crash banner to stderr if session info is available.
+ * Returns true if a banner was written, false otherwise.
+ * Exported for testing.
+ */
+export function onProcessError(): boolean {
+  if (!globalSessionInfo) return false;
+  process.stderr.write(formatCrashBanner(globalSessionInfo));
+  return true;
+}
+
+/**
+ * Register process-level error handlers exactly once per process.
+ * Uses uncaughtExceptionMonitor so we observe crashes without
+ * altering Node's default crash behavior (stack trace + exit).
+ * Exported for testing.
+ */
+export function registerProcessHandlers(): void {
+  if (processHandlersRegistered) return;
+  processHandlersRegistered = true;
+
+  process.on("uncaughtExceptionMonitor", () => {
+    onProcessError();
+  });
+
+  process.on("unhandledRejection", () => {
+    onProcessError();
+  });
+}
+
+/**
+ * Reset module-scoped state for testing.
+ * If sessionInfo is provided, sets it as the current session info.
+ * Also resets the process handler registration guard.
+ */
+export function _testReset(sessionInfo?: SessionInfo): void {
+  globalSessionInfo = sessionInfo;
+  processHandlersRegistered = false;
+}
+
+export default function (pi: ExtensionAPI) {
+  // Register process-level error handlers exactly once per process.
+  registerProcessHandlers();
 
   pi.on("session_start", async (_event, ctx) => {
     const sessionId = ctx.sessionManager.getSessionId();
@@ -55,7 +96,7 @@ export default function (pi: ExtensionAPI) {
     const id = sessionId || sessionFile;
 
     if (id) {
-      sessionInfo = { id, sessionFile, hasUI: ctx.hasUI };
+      globalSessionInfo = { id, sessionFile, hasUI: ctx.hasUI };
     }
   });
 
@@ -70,7 +111,7 @@ export default function (pi: ExtensionAPI) {
     }
 
     // Update session info in case session_start didn't capture it
-    sessionInfo = { id, sessionFile, hasUI: ctx.hasUI };
+    globalSessionInfo = { id, sessionFile, hasUI: ctx.hasUI };
 
     const resumeCmd = `pi --session ${id}`;
     const forkCmd = `pi --fork ${id}`;
@@ -98,13 +139,5 @@ export default function (pi: ExtensionAPI) {
       // Non-TUI mode: write directly to stderr
       process.stderr.write(`\nSession: ${id}\nResume: ${resumeCmd}\nFork:   ${forkCmd}\n`);
     }
-  });
-
-  process.on("uncaughtException", () => {
-    onProcessError();
-  });
-
-  process.on("unhandledRejection", () => {
-    onProcessError();
   });
 }
